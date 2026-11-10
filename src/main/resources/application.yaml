@@ -1,0 +1,54 @@
+server:
+  port: 8082
+  shutdown: graceful
+
+spring:
+  application:
+    name: financial-coach-service
+
+  # Configuration PostgreSQL
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/coach_db}
+    username: postgres
+    password: password
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      pool-name: CoachHikariPool
+
+  jpa:
+    hibernate:
+      ddl-auto: validate # Jamais de ddl-auto update en production bancaire
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+  # Sécurité : Validation des tokens émis par identity-service (JWKS)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+
+  # Moteur IA Spring AI
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:mock-key-for-dev}
+      chat:
+        options:
+          model: gpt-4o-mini
+          temperature: 0.1 # Zéro créativité/hallucination, rigueur maximale
+
+# Auditing & Monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
