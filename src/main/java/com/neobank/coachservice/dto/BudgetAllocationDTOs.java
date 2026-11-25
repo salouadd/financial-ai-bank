@@ -2,6 +2,8 @@ package com.neobank.coachservice.dto;
 
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
@@ -12,6 +14,8 @@ public class BudgetAllocationDTOs {
     public record AllocationRequest(
             @NotNull(message = "Le montant net mensuel est obligatoire")
             @DecimalMin(value = "0.01", message = "Le revenu net doit être supérieur à 0")
+            @DecimalMax(value = "1000000.00", message = "Le revenu net ne peut pas dépasser 1 000 000 MAD")
+            @Digits(integer = 7, fraction = 2, message = "Le revenu doit avoir au maximum deux décimales")
             BigDecimal netMonthlyIncome,
 
             @Min(value = 0, message = "Le ratio Besoins doit être >= 0")

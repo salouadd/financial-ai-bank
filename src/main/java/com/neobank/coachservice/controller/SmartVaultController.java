@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
 @RequestMapping("/api/v1/coach/vaults")
 public class SmartVaultController {
@@ -31,7 +33,7 @@ public class SmartVaultController {
             @Valid @RequestBody CreateVaultRequest request,
             HttpServletRequest servletRequest) {
 
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         String clientIp = servletRequest.getRemoteAddr();
 
         VaultResponse response = vaultService.createVault(userId, request, clientIp);
@@ -40,7 +42,7 @@ public class SmartVaultController {
 
     @GetMapping
     public ResponseEntity<List<VaultResponse>> list(@AuthenticationPrincipal Jwt jwt) {
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         return ResponseEntity.ok(vaultService.listUserVaults(userId));
     }
 
@@ -51,7 +53,7 @@ public class SmartVaultController {
             @Valid @RequestBody RenameVaultRequest request,
             HttpServletRequest servletRequest) {
 
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         String clientIp = servletRequest.getRemoteAddr();
 
         VaultResponse response = vaultService.renameVault(userId, vaultId, request, clientIp);
@@ -64,18 +66,10 @@ public class SmartVaultController {
             @PathVariable UUID vaultId,
             HttpServletRequest servletRequest) {
 
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         String clientIp = servletRequest.getRemoteAddr();
 
         vaultService.deleteVault(userId, vaultId, clientIp);
         return ResponseEntity.noContent().build();
-    }
-
-    private UUID extractUserId(Jwt jwt) {
-        String userIdClaim = jwt.getClaimAsString("userId");
-        if (userIdClaim != null && !userIdClaim.isBlank()) {
-            return UUID.fromString(userIdClaim);
-        }
-        return UUID.fromString(jwt.getSubject());
     }
 }

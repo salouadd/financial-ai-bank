@@ -11,6 +11,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
 @RequestMapping("/api/v1/coach/me")
 public class PrivacyController {
@@ -23,7 +25,7 @@ public class PrivacyController {
 
     @GetMapping("/consent")
     public ResponseEntity<ConsentStatusResponse> getConsent(@AuthenticationPrincipal Jwt jwt) {
-        UUID userId = UUID.fromString(jwt.getSubject());
+        UUID userId = userId(jwt);
         return ResponseEntity.ok(privacyService.getConsentStatus(userId));
     }
 
@@ -33,25 +35,23 @@ public class PrivacyController {
             @Valid @RequestBody UpdateConsentRequest request,
             HttpServletRequest servletRequest) {
 
-        UUID userId = UUID.fromString(jwt.getSubject());
+        UUID userId = userId(jwt);
         String ip = servletRequest.getRemoteAddr();
         return ResponseEntity.ok(privacyService.updateConsent(userId, request, ip));
     }
 
     @GetMapping("/export")
     public ResponseEntity<UserDataExportResponse> exportData(@AuthenticationPrincipal Jwt jwt) {
-        UUID userId = UUID.fromString(jwt.getSubject());
+        UUID userId = userId(jwt);
         return ResponseEntity.ok(privacyService.exportUserData(userId));
     }
 
     @DeleteMapping("/data")
     public ResponseEntity<Void> eraseData(
-            @AuthenticationPrincipal Jwt jwt,
-            HttpServletRequest servletRequest) {
+            @AuthenticationPrincipal Jwt jwt) {
 
-        UUID userId = UUID.fromString(jwt.getSubject());
-        String ip = servletRequest.getRemoteAddr();
-        privacyService.deleteUserData(userId, ip);
+        UUID userId = userId(jwt);
+        privacyService.deleteUserData(userId);
         return ResponseEntity.noContent().build();
     }
 }

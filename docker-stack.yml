@@ -1,0 +1,47 @@
+services:
+  financial-coach-service:
+    # Publish this image before deployment; docker stack deploy does not build it.
+    image: ${FINANCIAL_COACH_IMAGE:?Build and push the image, then set FINANCIAL_COACH_IMAGE to its immutable tag or digest}
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      # This external Swarm secret is a Spring YAML file containing the DB password,
+      # spring.ai.openai.api-key, and services.sca.api-token.
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/run/secrets/financial-coach-secrets.yaml
+      # PostgreSQL is intentionally external until its production contract is confirmed.
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:?Set the reachable Financial Coach database URL}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME:?Set the dedicated database user}
+      JWKS_URI: ${JWKS_URI:?Set the Identity JWKS URL reachable from the platform-backend overlay}
+      JWT_ISSUER: ${JWT_ISSUER:?Set the exact issuer emitted by Identity}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?Set the audience expected by Financial Coach}
+      SERVICES_TRANSACTION_SERVICE_BASE_URL: ${SERVICES_TRANSACTION_SERVICE_BASE_URL:?Set the Transaction Service URL}
+      SCA_PROVIDER_BASE_URL: ${SCA_PROVIDER_BASE_URL:?Set the SCA provider URL}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.groq.com/openai}
+      AI_MODEL: ${AI_MODEL:-openai/gpt-oss-120b}
+    secrets:
+      - source: financial_coach_runtime_config
+        target: financial-coach-secrets.yaml
+    networks:
+      - platform-backend
+      - gateway
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: rollback
+
+secrets:
+  financial_coach_runtime_config:
+    external: true
+    name: financial_coach_runtime_config
+
+networks:
+  platform-backend:
+    external: true
+    name: platform-backend
+  gateway:
+    external: true
+    name: ${GATEWAY_OVERLAY_NETWORK:?Set GATEWAY_OVERLAY_NETWORK to the Gateway overlay network}

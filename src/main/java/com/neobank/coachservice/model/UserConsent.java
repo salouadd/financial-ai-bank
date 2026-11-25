@@ -70,4 +70,6 @@ public class UserConsent {
     public String getPolicyVersion() { return policyVersion; }
     public Instant getConsentedAt() { return consentedAt; }
     public Instant getRevokedAt() { return revokedAt; }
+    public String getIpAddress() { return ipAddress; }
+    public Instant getUpdatedAt() { return updatedAt; }
 }

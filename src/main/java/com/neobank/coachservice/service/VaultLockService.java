@@ -1,11 +1,19 @@
 package com.neobank.coachservice.service;
 
-import com.neobank.coachservice.dto.VaultLockDTOs.*;
+import com.neobank.coachservice.dto.VaultLockDTOs.LockConfirmRequest;
+import com.neobank.coachservice.dto.VaultLockDTOs.LockConfirmResponse;
+import com.neobank.coachservice.dto.VaultLockDTOs.LockIntentRequest;
+import com.neobank.coachservice.dto.VaultLockDTOs.LockIntentResponse;
+import com.neobank.coachservice.exception.ScaAttemptsExceededException;
+import com.neobank.coachservice.exception.ScaChallengeExpiredException;
+import com.neobank.coachservice.exception.ScaVerificationFailedException;
+import com.neobank.coachservice.exception.IdempotencyKeyConflictException;
 import com.neobank.coachservice.model.AuditLog;
 import com.neobank.coachservice.model.SmartVault;
 import com.neobank.coachservice.model.VaultLedgerEntry;
 import com.neobank.coachservice.model.VaultLockIntent;
 import com.neobank.coachservice.repository.*;
+import com.neobank.coachservice.sca.ScaProvider;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,20 +27,25 @@ import java.util.UUID;
 @Service
 public class VaultLockService {
 
+    private static final int MAX_SCA_ATTEMPTS = 5;
+
     private final SmartVaultRepository vaultRepository;
     private final VaultLockIntentRepository intentRepository;
     private final VaultLedgerEntryRepository ledgerRepository;
     private final AuditLogRepository auditLogRepository;
+    private final ScaProvider scaProvider;
 
     public VaultLockService(
             SmartVaultRepository vaultRepository,
             VaultLockIntentRepository intentRepository,
             VaultLedgerEntryRepository ledgerRepository,
-            AuditLogRepository auditLogRepository) {
+            AuditLogRepository auditLogRepository,
+            ScaProvider scaProvider) {
         this.vaultRepository = vaultRepository;
         this.intentRepository = intentRepository;
         this.ledgerRepository = ledgerRepository;
         this.auditLogRepository = auditLogRepository;
+        this.scaProvider = scaProvider;
     }
 
     /**
@@ -50,10 +63,13 @@ public class VaultLockService {
         }
 
         Instant expiresAt = Instant.now().plus(5, ChronoUnit.MINUTES);
-        String challenge = "SCA-OTP-AUTH-REQUIRED";
 
-        VaultLockIntent intent = new VaultLockIntent(userId, vaultId, req.amount(), challenge, expiresAt);
+        VaultLockIntent intent = new VaultLockIntent(userId, vaultId, req.amount(), "PENDING", expiresAt);
         VaultLockIntent saved = intentRepository.save(intent);
+        String challengeId = scaProvider.issueChallenge(new ScaProvider.ChallengeRequest(
+                userId, saved.getId(), vaultId, req.amount(), expiresAt));
+        saved.setScaChallenge(challengeId);
+        intentRepository.save(saved);
 
         AuditLog audit = new AuditLog(
                 userId, "LOCK_INTENT_CREATED", "SMART_VAULT", vaultId.toString(),
@@ -62,13 +78,17 @@ public class VaultLockService {
         );
         auditLogRepository.save(audit);
 
-        return new LockIntentResponse(saved.getId(), vaultId, req.amount(), "SMS_OTP", expiresAt);
+        return new LockIntentResponse(saved.getId(), vaultId, req.amount(), "PROVIDER_OTP", expiresAt);
     }
 
     /**
      * Étape 2 : Confirmation avec validation SCA et protection contre le rejeu
      */
-    @Transactional
+    @Transactional(noRollbackFor = {
+            ScaVerificationFailedException.class,
+            ScaChallengeExpiredException.class,
+            ScaAttemptsExceededException.class
+    })
     public LockConfirmResponse confirmLock(
             UUID userId,
             UUID vaultId,
@@ -76,41 +96,65 @@ public class VaultLockService {
             LockConfirmRequest req,
             String clientIp) {
 
-        // 1. Détection anti-rejeu par Idempotency-Key
+        // Serialize requests using the same user-scoped key through transaction commit.
+        ledgerRepository.lockIdempotencyKey(userId, idempotencyKey);
         Optional<VaultLedgerEntry> existing = ledgerRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
         if (existing.isPresent()) {
-            VaultLedgerEntry entry = existing.get();
-            SmartVault vault = vaultRepository.findByIdAndUserId(vaultId, userId)
-                    .orElseThrow(() -> new EntityNotFoundException("Coffre introuvable."));
-            return new LockConfirmResponse(
-                    entry.getId(),
-                    vaultId,
-                    entry.getAmount(),
-                    vault.getCurrentBalance(),
-                    entry.getCreatedAt(),
-                    "COMPLETED_IDEMPOTENT_REPLAY"
-            );
+            return replay(existing.get(), userId, vaultId, idempotencyKey, req.intentId());
         }
 
         // 2. Validation de l'intention
-        VaultLockIntent intent = intentRepository.findByIdAndUserId(req.intentId(), userId)
+        VaultLockIntent intent = intentRepository.findByIdAndUserIdForUpdate(req.intentId(), userId)
                 .orElseThrow(() -> new EntityNotFoundException("Intention de verrouillage expirée ou invalide."));
+
+        existing = ledgerRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
+        if (existing.isPresent()) {
+            return replay(existing.get(), userId, vaultId, idempotencyKey, req.intentId());
+        }
 
         if (!intent.getVaultId().equals(vaultId)) {
             throw new IllegalArgumentException("L'intention ne correspond pas à ce coffre-fort.");
         }
-        if (intent.getStatus() != VaultLockIntent.IntentStatus.PENDING || intent.isExpired()) {
-            throw new IllegalStateException("L'intention de verrouillage est expirée ou déjà consommée.");
+        if (intent.getStatus() != VaultLockIntent.IntentStatus.PENDING) {
+            throw new ScaChallengeExpiredException();
+        }
+        if (intent.isExpired()) {
+            intent.markExpired();
+            intentRepository.save(intent);
+            throw new ScaChallengeExpiredException();
+        }
+        if (intent.getFailedAttempts() >= MAX_SCA_ATTEMPTS) {
+            intent.markFailed();
+            intentRepository.save(intent);
+            throw new ScaAttemptsExceededException();
         }
 
-        // 3. Validation de la signature SCA (défi 2FA)
-        if (!validateScaChallenge(intent.getScaChallenge(), req.scaCode())) {
-            throw new SecurityException("Code de sécurité SCA invalide.");
+        // The provider validates both possession and the exact transaction context.
+        boolean verified = scaProvider.verifyChallenge(new ScaProvider.VerificationRequest(
+                intent.getScaChallenge(),
+                userId,
+                intent.getId(),
+                vaultId,
+                intent.getAmount(),
+                req.scaCode()));
+        if (!verified) {
+            intent.incrementFailedAttempts();
+            if (intent.getFailedAttempts() >= MAX_SCA_ATTEMPTS) {
+                intent.markFailed();
+                intentRepository.save(intent);
+                throw new ScaAttemptsExceededException();
+            }
+            intentRepository.save(intent);
+            throw new ScaVerificationFailedException();
         }
 
         // 4. Crédit du coffre (protégé par @Version contre les accès concurrents)
-        SmartVault vault = vaultRepository.findByIdAndUserId(vaultId, userId)
+        SmartVault vault = vaultRepository.findByIdAndUserIdForUpdate(vaultId, userId)
                 .orElseThrow(() -> new EntityNotFoundException("Coffre introuvable."));
+        existing = ledgerRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
+        if (existing.isPresent()) {
+            return replay(existing.get(), userId, vaultId, idempotencyKey, req.intentId());
+        }
         vault.credit(intent.getAmount());
         vaultRepository.save(vault);
 
@@ -146,8 +190,28 @@ public class VaultLockService {
         );
     }
 
-    private boolean validateScaChallenge(String challenge, String scaCode) {
-        // En production, vérification auprès du HSM ou du service OTP/FIDO2
-        return scaCode != null && !scaCode.isBlank() && scaCode.length() == 6;
+    private LockConfirmResponse replay(
+            VaultLedgerEntry entry,
+            UUID userId,
+            UUID vaultId,
+            String idempotencyKey,
+            UUID intentId) {
+        if (!entry.getUserId().equals(userId)
+                || !entry.getVaultId().equals(vaultId)
+                || !entry.getIntentId().equals(intentId)
+                || !entry.getIdempotencyKey().equals(idempotencyKey)
+                || !"LOCK_INFLOW".equals(entry.getEntryType())) {
+            throw new IdempotencyKeyConflictException();
+        }
+        SmartVault vault = vaultRepository.findByIdAndUserId(vaultId, userId)
+                .orElseThrow(() -> new EntityNotFoundException("Coffre introuvable."));
+        return new LockConfirmResponse(
+                entry.getId(),
+                vaultId,
+                entry.getAmount(),
+                vault.getCurrentBalance(),
+                entry.getCreatedAt(),
+                "COMPLETED_IDEMPOTENT_REPLAY"
+        );
     }
 }

@@ -21,11 +21,22 @@ services:
     ports:
       - "${APP_PORT:-8082}:8082"
     environment:
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
+      MAX_HTTP_REQUEST_SIZE: ${MAX_HTTP_REQUEST_SIZE:-65536}
+      AI_ANALYSES_PER_MINUTE: ${AI_ANALYSES_PER_MINUTE:-5}
+      SALARY_DETECTIONS_PER_MINUTE: ${SALARY_DETECTIONS_PER_MINUTE:-10}
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-coach_db}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock-key-for-dev}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.groq.com/openai}
+      AI_MODEL: ${AI_MODEL:-openai/gpt-oss-120b}
+      GROQ_API_KEY: ${GROQ_API_KEY:-mock-key-for-dev}
       JWKS_URI: ${JWKS_URI:-http://host.docker.internal:8081/.well-known/jwks.json}
+      JWT_ISSUER: ${JWT_ISSUER:?Set JWT_ISSUER to the trusted identity issuer}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?Set JWT_AUDIENCE to this API audience}
+      SCA_PROVIDER_ENABLED: ${SCA_PROVIDER_ENABLED:-false}
+      SCA_PROVIDER_BASE_URL: ${SCA_PROVIDER_BASE_URL:-}
+      SCA_PROVIDER_API_TOKEN: ${SCA_PROVIDER_API_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

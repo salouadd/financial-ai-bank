@@ -1,0 +1,62 @@
+groups:
+  - name: financial-coach-security
+    rules:
+      - alert: CoachAuthenticationFailureBurst
+        expr: sum(increase(coach_security_authentication_failures_total{outcome="unauthorized"}[5m])) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Burst of failed authentication attempts"
+          description: "More than 20 authentication failures were recorded over five minutes."
+
+      - alert: CoachScaFailureBurst
+        expr: sum(increase(coach_security_sca_events_total{outcome=~"rejected|attempts_exceeded"}[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated SCA verification failures"
+          description: "SCA rejections or exceeded-attempt events crossed the configured threshold."
+
+      - alert: CoachExternalProviderFailures
+        expr: sum by (provider) (rate(coach_provider_failures_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External provider failures"
+          description: "Provider {{ $labels.provider }} has reported repeated failures."
+
+      - alert: CoachAiInvalidOutputBurst
+        expr: sum(increase(coach_ai_analysis_events_total{outcome="invalid_output"}[10m])) > 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AI output validation failures"
+          description: "Multiple AI responses failed the service output contract."
+
+      - alert: CoachAiFallbackRatioHigh
+        expr: |
+          (
+            sum(rate(coach_ai_analysis_events_total{outcome="fallback"}[10m]))
+            /
+            clamp_min(sum(rate(coach_ai_analysis_events_total[10m])), 0.01)
+          ) > 0.25
+          and sum(increase(coach_ai_analysis_events_total[10m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High AI analysis fallback ratio"
+          description: "More than 25% of recent AI analyses are falling back."
+
+      - alert: CoachRateLimitEventBurst
+        expr: sum(increase(coach_security_rate_limit_events_total[5m])) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual rate-limit activity"
+          description: "Rate-limit events crossed the configured five-minute threshold."

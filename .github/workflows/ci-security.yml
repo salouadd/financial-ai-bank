@@ -1,0 +1,128 @@
+name: CI and security checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-scan:
+    name: Verify, scan, and build
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: coach_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d coach_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      JWT_ISSUER: https://identity.example.test
+      JWT_AUDIENCE: financial-coach-service
+      SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/coach_db
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Check versioned container base images
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t bases < <(grep -E '^[[:space:]]*FROM[[:space:]]+' Dockerfile)
+          test "${#bases[@]}" -eq 2
+          for base in "${bases[@]}"; do
+            image="$(awk '{print $2}' <<< "$base")"
+            [[ "$image" == *@sha256:* || "$image" == *:* ]]
+            [[ "$image" != *:latest ]]
+          done
+          grep -Eq '^[[:space:]]*image:[[:space:]]+postgres:17-alpine([[:space:]]|$)' docker-compose.yml
+
+      - name: Run tests, package, and generate CycloneDX SBOM
+        run: ./mvnw -B verify org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom
+
+      - name: Check Maven dependencies with OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: >-
+          ./mvnw -B org.owasp:dependency-check-maven:12.1.0:check
+          -DfailBuildOnCVSS=7
+          -DfailOnError=true
+          -DnvdApiKey="${NVD_API_KEY}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container image for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          tags: financial-coach-service:ci
+          load: true
+          push: false
+
+      - name: Scan source and Docker configuration with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          format: json
+          output: trivy-source-report.json
+
+      - name: Scan built image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: image
+          image-ref: financial-coach-service:ci
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          format: json
+          output: trivy-image-report.json
+
+      - name: Upload SBOM and security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-security-reports
+          path: |
+            target/bom.json
+            target/dependency-check-report.html
+            target/dependency-check-report.json
+            trivy-source-report.json
+            trivy-image-report.json
+          if-no-files-found: warn
+          retention-days: 14

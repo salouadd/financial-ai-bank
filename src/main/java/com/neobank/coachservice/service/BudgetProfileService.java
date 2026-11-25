@@ -69,7 +69,7 @@ public class BudgetProfileService {
         AuditLog audit = new AuditLog(userId, action, "BUDGET_PROFILE", saved.getId().toString(), detailsJson, clientIp);
         auditLogRepository.save(audit);
 
-        log.info("Action={} exécutée pour userId={} avec profileId={}", action, userId, saved.getId());
+        log.info("Action de profil budgétaire exécutée: {}", action);
 
         return mapToResponse(saved);
     }

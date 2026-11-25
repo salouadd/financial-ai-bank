@@ -11,6 +11,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
 @RequestMapping("/api/v1/coach/allocate")
 public class BudgetAllocationController {
@@ -26,7 +28,7 @@ public class BudgetAllocationController {
             @AuthenticationPrincipal Jwt jwt,
             @Valid @RequestBody AllocationRequest request) {
 
-        UUID userId = UUID.fromString(jwt.getSubject());
+        UUID userId = userId(jwt);
         AllocationResponse response = allocationService.calculateAllocation(userId, request);
         return ResponseEntity.ok(response);
     }

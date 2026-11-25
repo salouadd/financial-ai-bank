@@ -2,6 +2,8 @@ package com.neobank.coachservice.dto;
 
 import com.neobank.coachservice.model.SmartVault.VaultType;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -22,6 +24,8 @@ public class SmartVaultDTOs {
             VaultType vaultType,
 
             @DecimalMin(value = "0.01", message = "L'objectif d'épargne doit être supérieur à 0")
+            @DecimalMax(value = "10000000.00", message = "L'objectif ne peut pas dépasser 10 000 000 MAD")
+            @Digits(integer = 8, fraction = 2, message = "L'objectif doit avoir au maximum deux décimales")
             BigDecimal targetAmount,
 
             @Min(value = 1, message = "Le jour de transfert doit être >= 1")

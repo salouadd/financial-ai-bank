@@ -1,6 +1,7 @@
 package com.neobank.coachservice.model;
 
 import jakarta.persistence.*;
+
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
@@ -34,7 +35,8 @@ public class VaultLedgerEntry {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
-    public VaultLedgerEntry() {}
+    public VaultLedgerEntry() {
+    }
 
     public VaultLedgerEntry(UUID userId, UUID vaultId, UUID intentId, String idempotencyKey, BigDecimal amount, String entryType) {
         this.userId = userId;
@@ -46,8 +48,35 @@ public class VaultLedgerEntry {
         this.createdAt = Instant.now();
     }
 
-    public UUID getId() { return id; }
-    public BigDecimal getAmount() { return amount; }
-    public String getEntryType() { return entryType; }
-    public Instant getCreatedAt() { return createdAt; }
+    public UUID getId() {
+        return id;
+    }
+
+    public UUID getUserId() {
+        return userId;
+    }
+
+    public UUID getVaultId() {
+        return vaultId;
+    }
+
+    public UUID getIntentId() {
+        return intentId;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public BigDecimal getAmount() {
+        return amount;
+    }
+
+    public String getEntryType() {
+        return entryType;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
 }

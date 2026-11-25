@@ -1,0 +1,30 @@
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${JWKS_URI}
+  ai:
+    openai:
+      base-url: ${AI_BASE_URL:https://api.groq.com/openai}
+      api-key: ${GROQ_API_KEY}
+      chat:
+        options:
+          model: ${AI_MODEL:openai/gpt-oss-120b}
+
+security:
+  jwt:
+    issuer: ${JWT_ISSUER}
+    audience: ${JWT_AUDIENCE}
+
+services:
+  transaction-service:
+    base-url: ${SERVICES_TRANSACTION_SERVICE_BASE_URL}
+  sca:
+    enabled: true
+    base-url: ${SCA_PROVIDER_BASE_URL}
+    api-token: ${SCA_PROVIDER_API_TOKEN}

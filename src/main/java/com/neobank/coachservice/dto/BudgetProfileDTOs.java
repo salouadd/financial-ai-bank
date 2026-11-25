@@ -10,6 +10,8 @@ public class BudgetProfileDTOs {
     public record UpsertProfileRequest(
             @NotNull(message = "Le revenu mensuel net est obligatoire")
             @DecimalMin(value = "0.01", message = "Le revenu net doit être supérieur à 0")
+            @DecimalMax(value = "1000000.00", message = "Le revenu net ne peut pas dépasser 1 000 000 MAD")
+            @Digits(integer = 7, fraction = 2, message = "Le revenu doit avoir au maximum deux décimales")
             BigDecimal netMonthlyIncome,
 
             @Min(value = 0, message = "Le ratio Besoins doit être >= 0")

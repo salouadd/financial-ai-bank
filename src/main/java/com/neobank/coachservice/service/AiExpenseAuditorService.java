@@ -2,9 +2,11 @@ package com.neobank.coachservice.service;
 
 import com.neobank.coachservice.dto.AiExpenseDTOs.*;
 import com.neobank.coachservice.model.AuditLog;
-import com.neobank.coachservice.model.BudgetProfile;
+import com.neobank.coachservice.model.UserConsent;
 import com.neobank.coachservice.repository.AuditLogRepository;
-import com.neobank.coachservice.repository.BudgetProfileRepository;
+import com.neobank.coachservice.repository.UserConsentRepository;
+import com.neobank.coachservice.exception.AiConsentRequiredException;
+import com.neobank.coachservice.monitoring.SecurityMonitoringMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -13,12 +15,14 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.*;
-import java.util.stream.Collectors;
 
 @Service
 public class AiExpenseAuditorService {
 
     private static final Logger log = LoggerFactory.getLogger(AiExpenseAuditorService.class);
+    private static final int MAX_RAW_ADVICE_ITEMS = 50;
+    private static final int MAX_RETURNED_ADVICES = 3;
+    private static final BigDecimal MAX_MODEL_AMOUNT = new BigDecimal("1000000.00");
 
     // Liste blanche stricte des catégories autorisées (F6)
     private static final Set<String> ALLOWED_CATEGORIES = Set.of(
@@ -32,27 +36,26 @@ public class AiExpenseAuditorService {
     );
 
     private final ChatClient chatClient;
-    private final BudgetProfileRepository profileRepository;
+    private final UserConsentRepository consentRepository;
     private final AuditLogRepository auditLogRepository;
+    private final SecurityMonitoringMetrics metrics;
 
     public AiExpenseAuditorService(
             ChatClient.Builder chatClientBuilder,
-            BudgetProfileRepository profileRepository,
-            AuditLogRepository auditLogRepository) {
+            UserConsentRepository consentRepository,
+            AuditLogRepository auditLogRepository,
+            SecurityMonitoringMetrics metrics) {
         this.chatClient = chatClientBuilder.build();
-        this.profileRepository = profileRepository;
+        this.consentRepository = consentRepository;
         this.auditLogRepository = auditLogRepository;
+        this.metrics = metrics;
     }
 
     public BudgetPlanResponse analyzeExpenses(UUID userId, WasteAnalysisRequest request, String clientIp) {
-        // 1. Récupération du profil budgétaire pour contexte
-        BudgetProfile profile = profileRepository.findByUserId(userId)
-                .orElseGet(() -> new BudgetProfile(userId, new BigDecimal("10000.00"), 50, 30, 20));
+        requireActiveAiConsent(userId);
 
-        // 2. Étape F6.2 & F6.3 : Normalisation, filtrage sur liste blanche et arrondi
         Map<String, BigDecimal> sanitizedExpenses = sanitizeAndMaskExpenses(request.categorizedExpenses());
 
-        // 3. Prompt Système scellé : instruction fixe, aucun outil externe, interdiction stricte de markdown libre
         String systemPrompt = """
             Vous êtes le moteur d'audit financier d'une néobanque européenne de premier plan.
             Votre mission exclusive : identifier les gaspillages passifs, les abonnements superflus et les micro-dépenses récurrentes.
@@ -65,15 +68,8 @@ public class AiExpenseAuditorService {
             5. Répondez exclusivement au format JSON structuré correspondant à l'entité demandée.
             """;
 
-        String sanitizedGoal = sanitizeUserInput(request.userFinancialGoal());
-        String userPrompt = String.format(
-                "Revenu net : %s MAD. Objectif client : %s. Dépenses réelles agrégées par catégorie : %s",
-                profile.getNetMonthlyIncome().toPlainString(),
-                sanitizedGoal != null ? sanitizedGoal : "Optimisation générale de l'épargne",
-                sanitizedExpenses.toString()
-        );
+        String userPrompt = buildUserPrompt(sanitizedExpenses);
 
-        // 4. Étape F6.4 & F6.5 : Appel Spring AI avec Structured Output
         RawAiPlanResponse rawResponse;
         try {
             rawResponse = chatClient.prompt()
@@ -82,19 +78,26 @@ public class AiExpenseAuditorService {
                     .call()
                     .entity(RawAiPlanResponse.class);
         } catch (Exception e) {
-            log.error("Échec de l'appel Spring AI pour userId={} : {}", userId, e.getMessage());
-            return generateFallbackResponse(sanitizedExpenses);
+            log.error("Échec de l'appel au fournisseur IA.");
+            metrics.providerFailure("ai");
+            metrics.aiAnalysis("fallback");
+            return generateFallbackResponse();
         }
 
-        // 5. Étape F7 : Validation déterministe en Java (Garde-fous post-LLM)
         BudgetPlanResponse verifiedResponse = validateAndFilterResponse(rawResponse, sanitizedExpenses);
+        if (verifiedResponse == null) {
+            log.warn("La réponse du fournisseur IA ne respecte pas le contrat de sortie.");
+            metrics.aiAnalysis("invalid_output");
+            metrics.aiAnalysis("fallback");
+            return generateFallbackResponse();
+        }
 
-        // 6. Audit Trail
+        metrics.aiAnalysis("success");
         AuditLog audit = new AuditLog(
                 userId,
                 "AI_EXPENSE_AUDIT",
                 "FINANCIAL_ADVISOR",
-                profile.getId().toString(),
+                userId.toString(),
                 String.format("{\"adviceCount\":%d,\"totalSavings\":%s}",
                         verifiedResponse.verifiedAdvices().size(),
                         verifiedResponse.potentialMonthlySavings().toPlainString()),
@@ -105,6 +108,17 @@ public class AiExpenseAuditorService {
         return verifiedResponse;
     }
 
+    private void requireActiveAiConsent(UUID userId) {
+        consentRepository.findByUserId(userId)
+                .filter(UserConsent::isAiProcessingConsented)
+                .filter(value -> value.getRevokedAt() == null)
+                .orElseThrow(AiConsentRequiredException::new);
+    }
+
+    String buildUserPrompt(Map<String, BigDecimal> sanitizedExpenses) {
+        return "Dépenses agrégées par catégorie (MAD) : " + sanitizedExpenses;
+    }
+
     /**
      * F6 : Filtrage contre une liste blanche et masquage PII
      */
@@ -112,15 +126,21 @@ public class AiExpenseAuditorService {
         Map<String, BigDecimal> sanitized = new HashMap<>();
 
         for (Map.Entry<String, BigDecimal> entry : rawExpenses.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null
+                    || entry.getValue().compareTo(BigDecimal.ZERO) < 0
+                    || entry.getValue().compareTo(MAX_MODEL_AMOUNT) > 0) {
+                throw new IllegalArgumentException("Les catégories et montants de dépenses doivent être valides.");
+            }
             String categoryUpper = entry.getKey().trim().toUpperCase().replaceAll("[^A-Z_]", "");
-
-            // Rejet ou classification en AUTRE si catégorie non conforme
             String finalCategory = ALLOWED_CATEGORIES.contains(categoryUpper) ? categoryUpper : "AUTRE";
             BigDecimal roundedAmount = entry.getValue().setScale(2, RoundingMode.HALF_UP);
 
             sanitized.merge(finalCategory, roundedAmount, BigDecimal::add);
         }
 
+        if (sanitized.values().stream().anyMatch(value -> value.compareTo(MAX_MODEL_AMOUNT) > 0)) {
+            throw new IllegalArgumentException("Le total agrégé par catégorie dépasse la limite autorisée.");
+        }
         return sanitized;
     }
 
@@ -128,96 +148,94 @@ public class AiExpenseAuditorService {
      * F7 : Validation stricte des données issues du LLM
      */
     private BudgetPlanResponse validateAndFilterResponse(RawAiPlanResponse raw, Map<String, BigDecimal> realExpenses) {
-        if (raw == null || raw.adviceList() == null) {
-            return generateFallbackResponse(realExpenses);
+        if (raw == null || raw.adviceList() == null || raw.adviceList().size() > MAX_RAW_ADVICE_ITEMS) {
+            return null;
         }
 
-        List<BudgetPlanResponse.VerifiedAdvice> verifiedList = new ArrayList<>();
-        BigDecimal totalPotentialSavings = BigDecimal.ZERO;
+        List<BudgetPlanResponse.VerifiedAdvice> finalAdvices = new ArrayList<>();
+        Map<String, BigDecimal> remainingSavingsByCategory = new HashMap<>(realExpenses);
+        Set<String> advisedCategories = new HashSet<>();
 
         for (RawAiPlanResponse.RawAdviceItem item : raw.adviceList()) {
-            if (item == null) continue;
-
-            // 1. Vérification du type de conseil
-            if (!ALLOWED_ADVICE_TYPES.contains(item.adviceType())) {
-                continue; // Rejet des types non certifiés
+            if (finalAdvices.size() == MAX_RETURNED_ADVICES) {
+                break;
+            }
+            if (item == null || item.category() == null || item.adviceType() == null
+                    || item.citedAmount() == null || item.suggestedSavings() == null) {
+                continue;
             }
 
-            // 2. Vérification de la catégorie
-            String cat = item.category() != null ? item.category().toUpperCase() : "AUTRE";
-            BigDecimal actualSpending = realExpenses.get(cat);
-            if (actualSpending == null || actualSpending.compareTo(BigDecimal.ZERO) <= 0) {
-                continue; // L'IA a inventé une dépense sur une catégorie inexistante -> rejet
+            String category = item.category().trim().toUpperCase(Locale.ROOT);
+            String adviceType = item.adviceType().trim().toUpperCase(Locale.ROOT);
+            BigDecimal actualSpending = realExpenses.get(category);
+            BigDecimal remainingCategoryAmount = remainingSavingsByCategory.get(category);
+            if (!ALLOWED_CATEGORIES.contains(category)
+                    || !ALLOWED_ADVICE_TYPES.contains(adviceType)
+                    || actualSpending == null
+                    || remainingCategoryAmount == null
+                    || actualSpending.compareTo(BigDecimal.ZERO) <= 0
+                    || advisedCategories.contains(category)) {
+                continue;
             }
 
-            // 3. Comparaison mathématique stricte (anti-hallucination)
-            BigDecimal cited = item.citedAmount() != null ? item.citedAmount() : actualSpending;
-            if (cited.compareTo(actualSpending) > 0) {
-                cited = actualSpending; // Tronquage au montant réel si l'IA gonfle le chiffre
+            BigDecimal citedAmount = item.citedAmount();
+            BigDecimal suggestedSavings = item.suggestedSavings();
+            if (isInvalidModelAmount(citedAmount)
+                    || citedAmount.compareTo(actualSpending) > 0
+                    || isInvalidModelAmount(suggestedSavings)
+                    || suggestedSavings.compareTo(citedAmount) > 0
+                    || suggestedSavings.compareTo(remainingCategoryAmount) > 0) {
+                continue;
             }
 
-            BigDecimal savings = item.suggestedSavings() != null ? item.suggestedSavings() : BigDecimal.ZERO;
-            if (savings.compareTo(actualSpending) > 0) {
-                savings = actualSpending.multiply(new BigDecimal("0.20")).setScale(2, RoundingMode.HALF_UP);
-            }
-
-            // 4. Nettoyage HTML et URLs
-            String sanitizedTip = sanitizeText(item.recommendation());
-
-            verifiedList.add(new BudgetPlanResponse.VerifiedAdvice(
-                    cat,
-                    item.adviceType(),
-                    cited,
-                    savings,
-                    sanitizedTip
+            finalAdvices.add(new BudgetPlanResponse.VerifiedAdvice(
+                    category,
+                    adviceType,
+                    citedAmount.setScale(2, RoundingMode.HALF_UP),
+                    suggestedSavings.setScale(2, RoundingMode.HALF_UP),
+                    buildVerifiedTip(adviceType)
             ));
-
-            totalPotentialSavings = totalPotentialSavings.add(savings);
+            advisedCategories.add(category);
+            remainingSavingsByCategory.put(
+                    category,
+                    remainingCategoryAmount.subtract(suggestedSavings)
+            );
         }
 
-        // Limite stricte : maximum 3 conseils pertinents présentés au client
-        List<BudgetPlanResponse.VerifiedAdvice> finalAdvices = verifiedList.stream()
-                .limit(3)
-                .toList();
+        BigDecimal totalPotentialSavings = finalAdvices.stream()
+                .map(BudgetPlanResponse.VerifiedAdvice::potentialSavings)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // Nettoyage de la synthèse
-        String cleanSummary = sanitizeText(raw.summary());
-        if (cleanSummary.isBlank()) {
-            cleanSummary = "Analyse complétée. Des pistes d'optimisation ont été détectées sur vos postes de dépenses.";
-        }
-
-        List<String> cleanSubs = raw.detectedSubscriptions() != null
-                ? raw.detectedSubscriptions().stream().map(this::sanitizeText).filter(s -> !s.isBlank()).toList()
-                : Collections.emptyList();
-
-        return new BudgetPlanResponse(cleanSummary, finalAdvices, cleanSubs, totalPotentialSavings);
+        String summary = finalAdvices.isEmpty()
+                ? "Aucun conseil n’a pu être validé à partir des dépenses fournies."
+                : "Pistes d’optimisation proposées à partir des montants vérifiés ci-dessous.";
+        return new BudgetPlanResponse(summary, finalAdvices, Collections.emptyList(), totalPotentialSavings);
     }
 
-    private String sanitizeUserInput(String input) {
-        if (input == null) return null;
-        return input.replaceAll("[\\r\\n]", " ")
-                .replaceAll("[<>{}\"\'`\\[\\]]", "")
-                .trim();
+    private boolean isInvalidModelAmount(BigDecimal amount) {
+        return amount.compareTo(BigDecimal.ZERO) < 0
+                || amount.compareTo(MAX_MODEL_AMOUNT) > 0
+                || amount.scale() > 2;
     }
 
-    private String sanitizeText(String text) {
-        if (text == null) return "";
-        return text.replaceAll("<[^>]*>", "") // Supprime toute balise HTML
-                .replaceAll("https?://\\S+", "") // Supprime tout lien URL
-                .replaceAll("[*#_`~]", "") // Supprime le markdown gras/italique/titres
-                .trim();
+    private String buildVerifiedTip(String adviceType) {
+        return switch (adviceType) {
+            case "REDUCE_SUBSCRIPTION" ->
+                    "Suggestion : vérifiez les abonnements concernés avant toute résiliation.";
+            case "LIMIT_MICRO_SPENDING" ->
+                    "Suggestion : fixez un plafond pour cette catégorie et suivez vos dépenses.";
+            case "INCREASE_SAVINGS" ->
+                    "Suggestion : étudiez si une part de cette dépense peut être affectée à l’épargne.";
+            case "OPTIMIZE_FIXED_COST" ->
+                    "Suggestion : comparez les coûts fixes concernés avant de modifier un contrat.";
+            default -> throw new IllegalArgumentException("Un type de conseil non autorisé a été accepté.");
+        };
     }
 
-    private BudgetPlanResponse generateFallbackResponse(Map<String, BigDecimal> realExpenses) {
+    private BudgetPlanResponse generateFallbackResponse() {
         return new BudgetPlanResponse(
-                "Analyse basée sur les règles financières standard : privilégiez le plafonnement de vos charges discrétionnaires.",
-                List.of(new BudgetPlanResponse.VerifiedAdvice(
-                        "LOISIRS",
-                        "LIMIT_MICRO_SPENDING",
-                        realExpenses.getOrDefault("LOISIRS", BigDecimal.ZERO),
-                        realExpenses.getOrDefault("LOISIRS", BigDecimal.ZERO).multiply(new BigDecimal("0.15")).setScale(2, RoundingMode.HALF_UP),
-                        "Plafonnez vos dépenses de loisirs hebdomadaires pour dégager une marge de sécurité financière."
-                )),
+                "L’analyse IA est indisponible ou n’a pas pu être validée. Aucun conseil ni montant d’économie n’est fourni.",
+                Collections.emptyList(),
                 Collections.emptyList(),
                 BigDecimal.ZERO
         );

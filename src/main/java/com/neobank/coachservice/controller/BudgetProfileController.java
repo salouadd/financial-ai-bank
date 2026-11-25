@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
 @RequestMapping("/api/v1/coach/profile")
 public class BudgetProfileController {
@@ -24,7 +26,7 @@ public class BudgetProfileController {
 
     @GetMapping
     public ResponseEntity<BudgetProfileResponse> getProfile(@AuthenticationPrincipal Jwt jwt) {
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         return ResponseEntity.ok(profileService.getProfile(userId));
     }
 
@@ -34,20 +36,10 @@ public class BudgetProfileController {
             @Valid @RequestBody UpsertProfileRequest request,
             HttpServletRequest servletRequest) {
 
-        UUID userId = extractUserId(jwt);
+        UUID userId = userId(jwt);
         String clientIp = servletRequest.getRemoteAddr();
 
         BudgetProfileResponse response = profileService.upsertProfile(userId, request, clientIp);
         return ResponseEntity.ok(response);
-    }
-
-    private UUID extractUserId(Jwt jwt) {
-        // 1. Cherche en priorité dans le claim explicite "userId"
-        String userIdClaim = jwt.getClaimAsString("userId");
-        if (userIdClaim != null && !userIdClaim.isBlank()) {
-            return UUID.fromString(userIdClaim);
-        }
-        // 2. Repli sur le subject standard
-        return UUID.fromString(jwt.getSubject());
     }
 }

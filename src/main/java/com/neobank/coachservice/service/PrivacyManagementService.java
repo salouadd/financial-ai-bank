@@ -4,8 +4,8 @@ import com.neobank.coachservice.dto.PrivacyDTOs.*;
 import com.neobank.coachservice.model.AuditLog;
 import com.neobank.coachservice.model.SmartVault;
 import com.neobank.coachservice.model.UserConsent;
+import com.neobank.coachservice.exception.DataErasureBlockedException;
 import com.neobank.coachservice.repository.*;
-import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,6 +24,9 @@ public class PrivacyManagementService {
     private final BudgetProfileRepository profileRepository;
     private final SmartVaultRepository vaultRepository;
     private final AuditLogRepository auditLogRepository;
+    private final VaultLockIntentRepository intentRepository;
+    private final VaultLedgerEntryRepository ledgerRepository;
+    private final UserRateLimiter userRateLimiter;
 
     public PrivacyManagementService(
             UserConsentRepository consentRepository,
@@ -32,7 +35,10 @@ public class PrivacyManagementService {
             BudgetRecommendationRepository recommendationRepository,
             BudgetProfileRepository profileRepository,
             SmartVaultRepository vaultRepository,
-            AuditLogRepository auditLogRepository) {
+            AuditLogRepository auditLogRepository,
+            VaultLockIntentRepository intentRepository,
+            VaultLedgerEntryRepository ledgerRepository,
+            UserRateLimiter userRateLimiter) {
         this.consentRepository = consentRepository;
         this.profileService = profileService;
         this.vaultService = vaultService;
@@ -40,6 +46,9 @@ public class PrivacyManagementService {
         this.profileRepository = profileRepository;
         this.vaultRepository = vaultRepository;
         this.auditLogRepository = auditLogRepository;
+        this.intentRepository = intentRepository;
+        this.ledgerRepository = ledgerRepository;
+        this.userRateLimiter = userRateLimiter;
     }
 
     @Transactional(readOnly = true)
@@ -81,44 +90,80 @@ public class PrivacyManagementService {
     public UserDataExportResponse exportUserData(UUID userId) {
         var profile = profileService.getProfile(userId);
         var vaults = vaultService.listUserVaults(userId);
-        var consent = getConsentStatus(userId);
+        ConsentExportItem consent = consentRepository.findByUserId(userId)
+                .map(c -> new ConsentExportItem(
+                        c.isAiProcessingConsented(),
+                        c.getPolicyVersion(),
+                        c.getConsentedAt(),
+                        c.getRevokedAt(),
+                        c.getIpAddress(),
+                        c.getUpdatedAt()))
+                .orElse(null);
         var recos = recommendationRepository.findAllByUserId(userId).stream()
                 .map(r -> new RecommendationHistoryItem(r.getId(), r.getSummary(), r.getPotentialMonthlySavings(), r.getRecommendationsPayload(), r.getCreatedAt()))
                 .toList();
+        List<LockIntentExportItem> intents = intentRepository.findAllByUserIdOrderByCreatedAtAsc(userId).stream()
+                .map(intent -> new LockIntentExportItem(
+                        intent.getId(),
+                        intent.getVaultId(),
+                        intent.getAmount(),
+                        intent.getStatus().name(),
+                        intent.getFailedAttempts(),
+                        intent.getExpiresAt(),
+                        intent.getCreatedAt()))
+                .toList();
+        List<LedgerEntryExportItem> ledgerEntries = ledgerRepository.findAllByUserIdOrderByCreatedAtAsc(userId).stream()
+                .map(entry -> new LedgerEntryExportItem(
+                        entry.getId(),
+                        entry.getVaultId(),
+                        entry.getIntentId(),
+                        entry.getAmount(),
+                        entry.getEntryType(),
+                        entry.getCreatedAt()))
+                .toList();
+        List<AuditLogExportItem> auditLogs = auditLogRepository.findAllByUserIdOrderByTimestampAsc(userId).stream()
+                .map(audit -> new AuditLogExportItem(
+                        audit.getId(),
+                        audit.getAction(),
+                        audit.getResourceType(),
+                        audit.getResourceId(),
+                        audit.getDetails(),
+                        audit.getIpAddress(),
+                        audit.getTimestamp()))
+                .toList();
 
-        return new UserDataExportResponse(userId, Instant.now(), consent, profile, vaults, recos);
+        return new UserDataExportResponse(userId, Instant.now(), consent, profile, vaults, recos, intents, ledgerEntries, auditLogs);
     }
 
     /**
      * Droit à l'oubli / Effacement (Loi 09-08 / RGPD)
      */
     @Transactional
-    public void deleteUserData(UUID userId, String clientIp) {
-        // 1. Contrôle : refuser si des coffres contiennent encore des fonds
+    public void deleteUserData(UUID userId) {
         List<SmartVault> activeVaults = vaultRepository.findAllByUserId(userId);
         boolean hasBalance = activeVaults.stream()
                 .anyMatch(v -> v.getCurrentBalance().compareTo(BigDecimal.ZERO) > 0);
 
         if (hasBalance) {
-            throw new IllegalStateException("Effacement impossible : des coffres contiennent encore un solde actif. Videz-les préalablement.");
+            throw new DataErasureBlockedException();
         }
 
-        // 2. Suppression des recommandations et coffres
+        UUID anonymousUserId = UUID.randomUUID();
+
         recommendationRepository.deleteAllByUserId(userId);
-        vaultRepository.deleteAll(activeVaults);
-
-        // 3. Suppression du profil budgétaire
         profileRepository.findByUserId(userId).ifPresent(profileRepository::delete);
+        consentRepository.deleteByUserId(userId);
 
-        // 4. Révocation définitive du consentement
-        consentRepository.findByUserId(userId).ifPresent(c -> {
-            c.revokeConsent(clientIp);
-            consentRepository.save(c);
-        });
+        ledgerRepository.anonymizeUserData(userId, anonymousUserId);
+        intentRepository.anonymizeLedgerIntents(userId, anonymousUserId);
+        intentRepository.deleteIntentsWithoutLedger(userId);
+        vaultRepository.anonymizeVaultsWithLedger(userId, anonymousUserId);
+        vaultRepository.deleteVaultsWithoutLedger(userId);
 
-        // 5. Audit de suppression sans conservation des PII
+        auditLogRepository.anonymizeUserData(userId, anonymousUserId);
         auditLogRepository.save(new AuditLog(
-                userId, "DATA_ERASURE_COMPLETED", "USER_PRIVACY", userId.toString(), "{}", clientIp
+                anonymousUserId, "DATA_ERASURE_COMPLETED", "USER_PRIVACY", null, "{}", null
         ));
+        userRateLimiter.forget(userId);
     }
 }

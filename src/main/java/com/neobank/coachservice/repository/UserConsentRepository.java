@@ -10,4 +10,5 @@ import java.util.UUID;
 @Repository
 public interface UserConsentRepository extends JpaRepository<UserConsent, UUID> {
     Optional<UserConsent> findByUserId(UUID userId);
+    void deleteByUserId(UUID userId);
 }

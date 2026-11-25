@@ -20,7 +20,7 @@ public class DataRetentionScheduler {
     }
 
     // Exécution quotidienne à 02:00 UTC
-    @Scheduled(cron = "0 0 2 * * *")
+    @Scheduled(cron = "0 0 2 * * *", zone = "UTC")
     @Transactional
     public void purgeExpiredData() {
         Instant now = Instant.now();

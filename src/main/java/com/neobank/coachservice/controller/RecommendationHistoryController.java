@@ -12,10 +12,16 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
+@Validated
 @RequestMapping("/api/v1/coach/recommendations")
 public class RecommendationHistoryController {
 
@@ -28,11 +34,11 @@ public class RecommendationHistoryController {
     @GetMapping
     public ResponseEntity<Page<RecommendationHistoryItem>> listRecommendations(
             @AuthenticationPrincipal Jwt jwt,
-            @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "10") int size) {
+            @RequestParam(defaultValue = "0") @Min(0) @Max(10000) int page,
+            @RequestParam(defaultValue = "10") @Min(1) @Max(50) int size) {
 
-        UUID userId = UUID.fromString(jwt.getSubject());
-        var pageable = PageRequest.of(page, Math.min(size, 50), Sort.by("createdAt").descending());
+        UUID userId = userId(jwt);
+        var pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
 
         Page<RecommendationHistoryItem> history = repository.findAllByUserId(userId, pageable)
                 .map(r -> new RecommendationHistoryItem(

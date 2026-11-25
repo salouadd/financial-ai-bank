@@ -3,6 +3,7 @@ package com.neobank.coachservice.controller;
 import com.neobank.coachservice.dto.AiExpenseDTOs.BudgetPlanResponse;
 import com.neobank.coachservice.dto.AiExpenseDTOs.WasteAnalysisRequest;
 import com.neobank.coachservice.service.AiExpenseAuditorService;
+import com.neobank.coachservice.service.UserRateLimiter;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -15,14 +16,18 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
+import static com.neobank.coachservice.security.JwtPrincipalUtils.userId;
+
 @RestController
 @RequestMapping("/api/v1/coach")
 public class AiExpenseAuditorController {
 
     private final AiExpenseAuditorService auditorService;
+    private final UserRateLimiter rateLimiter;
 
-    public AiExpenseAuditorController(AiExpenseAuditorService auditorService) {
+    public AiExpenseAuditorController(AiExpenseAuditorService auditorService, UserRateLimiter rateLimiter) {
         this.auditorService = auditorService;
+        this.rateLimiter = rateLimiter;
     }
 
     @PostMapping("/analyze-budget")
@@ -31,7 +36,8 @@ public class AiExpenseAuditorController {
             @Valid @RequestBody WasteAnalysisRequest request,
             HttpServletRequest servletRequest) {
 
-        UUID userId = UUID.fromString(jwt.getSubject());
+        UUID userId = userId(jwt);
+        rateLimiter.checkAiAnalysis(userId);
         String clientIp = servletRequest.getRemoteAddr();
 
         BudgetPlanResponse plan = auditorService.analyzeExpenses(userId, request, clientIp);

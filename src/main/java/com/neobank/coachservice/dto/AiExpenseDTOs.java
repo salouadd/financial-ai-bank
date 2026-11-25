@@ -1,7 +1,6 @@
 package com.neobank.coachservice.dto;
 
-import jakarta.validation.constraints.NotEmpty;
-import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.*;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -12,9 +11,13 @@ public class AiExpenseDTOs {
     public record WasteAnalysisRequest(
             @NotNull(message = "L'historique des dépenses catégorisées est obligatoire")
             @NotEmpty(message = "La liste des dépenses ne peut pas être vide")
-            Map<String, BigDecimal> categorizedExpenses,
+            @Size(max = 9, message = "Au maximum 9 catégories de dépenses sont autorisées")
+            Map<@NotBlank @Size(max = 40) String,
+                    @NotNull @DecimalMin(value = "0.00") @DecimalMax(value = "1000000.00") @Digits(integer = 7, fraction = 2)
+                            BigDecimal> categorizedExpenses,
 
-            String userFinancialGoal // Optionnel, ex: "Constitution de mon apport immobilier"
+            @Size(max = 160, message = "L'objectif financier ne peut pas dépasser 160 caractères")
+            String userFinancialGoal
     ) {}
 
     // Sortie brute attendue du LLM (Structured Output)
